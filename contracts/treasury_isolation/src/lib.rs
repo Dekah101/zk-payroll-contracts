@@ -225,9 +225,7 @@ impl TreasuryIsolationContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
-        if amount <= 0 {
-            return Err(TreasuryIsolationError::InvalidAmount);
-        }
+        Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
         bal.balance += amount;
@@ -251,9 +249,7 @@ impl TreasuryIsolationContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
-        if amount <= 0 {
-            return Err(TreasuryIsolationError::InvalidAmount);
-        }
+        Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
         let available = bal.balance - bal.reserved;
@@ -270,6 +266,10 @@ impl TreasuryIsolationContract {
     }
 
     /// Release a previously reserved amount (e.g. after cancellation).
+    ///
+    /// Validation is strict: the asset must exist for the company and the release
+    /// request cannot exceed the currently reserved amount. Releasing exactly the
+    /// reserved amount is valid and clears the reservation.
     pub fn release_reserve(
         env: Env,
         company_id: u64,
@@ -279,9 +279,7 @@ impl TreasuryIsolationContract {
         Self::require_not_paused(&env);
         Self::require_admin(&env);
 
-        if amount <= 0 {
-            return Err(TreasuryIsolationError::InvalidAmount);
-        }
+        Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
         if bal.reserved < amount {
@@ -317,9 +315,7 @@ impl TreasuryIsolationContract {
             return Err(TreasuryIsolationError::AssetMismatch);
         }
 
-        if amount <= 0 {
-            return Err(TreasuryIsolationError::InvalidAmount);
-        }
+        Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &treasury_asset)?;
         if bal.balance < amount {
@@ -390,6 +386,13 @@ impl TreasuryIsolationContract {
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
+
+    fn validate_positive_amount(amount: i128) -> Result<(), TreasuryIsolationError> {
+        if amount <= 0 {
+            return Err(TreasuryIsolationError::InvalidAmount);
+        }
+        Ok(())
+    }
 
     fn require_admin(env: &Env) {
         let admin: Address = env
@@ -483,6 +486,44 @@ mod tests {
 
         let after_release = client.release_reserve(&company_id, &asset, &1000i128);
         assert_eq!(after_release.reserved, 2000);
+    }
+
+    #[test]
+    fn test_release_reserve_invalid_amount_rejected() {
+        let (env, contract_id, _) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let company_id = 2u64;
+
+        client.register_asset(&company_id, &asset, &issuer, &symbol_short!("USDC"));
+        client.credit(&company_id, &asset, &10_000i128);
+        client.reserve(&company_id, &asset, &500i128);
+
+        let result = client.try_release_reserve(&company_id, &asset, &0i128);
+        assert_eq!(result.unwrap_err().unwrap(), TreasuryIsolationError::InvalidAmount);
+
+        let over_release = client.try_release_reserve(&company_id, &asset, &1_000i128);
+        assert_eq!(
+            over_release.unwrap_err().unwrap(),
+            TreasuryIsolationError::InsufficientReserve
+        );
+    }
+
+    #[test]
+    fn test_release_reserve_exact_amount_clears_reservation() {
+        let (env, contract_id, _) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let company_id = 3u64;
+
+        client.register_asset(&company_id, &asset, &issuer, &symbol_short!("USDC"));
+        client.credit(&company_id, &asset, &10_000i128);
+        client.reserve(&company_id, &asset, &2_500i128);
+
+        let after_release = client.release_reserve(&company_id, &asset, &2_500i128);
+        assert_eq!(after_release.reserved, 0);
     }
 
     #[test]
