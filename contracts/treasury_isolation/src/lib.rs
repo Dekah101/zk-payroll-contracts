@@ -252,6 +252,7 @@ impl TreasuryIsolationContract {
         Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
+        Self::validate_balance_state(&bal)?;
         let available = bal.balance - bal.reserved;
         if available < amount {
             return Err(TreasuryIsolationError::InsufficientBalance);
@@ -282,6 +283,7 @@ impl TreasuryIsolationContract {
         Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &asset)?;
+        Self::validate_balance_state(&bal)?;
         if bal.reserved < amount {
             return Err(TreasuryIsolationError::InsufficientReserve);
         }
@@ -318,6 +320,7 @@ impl TreasuryIsolationContract {
         Self::validate_positive_amount(amount)?;
 
         let mut bal = Self::load_balance(&env, company_id, &treasury_asset)?;
+        Self::validate_balance_state(&bal)?;
         if bal.balance < amount {
             return Err(TreasuryIsolationError::InsufficientBalance);
         }
@@ -356,7 +359,10 @@ impl TreasuryIsolationContract {
             .persistent()
             .get::<DataKey, AssetBalance>(&bal_key)
         {
-            Some(bal) => (bal.balance - bal.reserved) >= required_amount,
+            Some(bal) => match Self::validate_balance_state(&bal) {
+                Ok(_) => (bal.balance - bal.reserved) >= required_amount,
+                Err(_) => false,
+            },
             None => false,
         }
     }
@@ -390,6 +396,16 @@ impl TreasuryIsolationContract {
     fn validate_positive_amount(amount: i128) -> Result<(), TreasuryIsolationError> {
         if amount <= 0 {
             return Err(TreasuryIsolationError::InvalidAmount);
+        }
+        Ok(())
+    }
+
+    fn validate_balance_state(bal: &AssetBalance) -> Result<(), TreasuryIsolationError> {
+        if bal.balance < 0 || bal.reserved < 0 {
+            return Err(TreasuryIsolationError::InsufficientBalance);
+        }
+        if bal.reserved > bal.balance {
+            return Err(TreasuryIsolationError::InsufficientReserve);
         }
         Ok(())
     }
@@ -657,6 +673,31 @@ mod tests {
         assert_eq!(
             result.unwrap_err().unwrap(),
             TreasuryIsolationError::AssetMismatch
+        );
+    }
+
+    #[test]
+    fn test_release_reserve_rejects_corrupted_over_reserved_state() {
+        let (env, contract_id, _) = setup();
+        let client = TreasuryIsolationContractClient::new(&env, &contract_id);
+        let asset = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let company_id = 10u64;
+
+        client.register_asset(&company_id, &asset, &issuer, &symbol_short!("USDC"));
+        env.as_contract(&contract_id, || {
+            let corrupted = AssetBalance {
+                asset: asset.clone(),
+                balance: 1000,
+                reserved: 1500,
+            };
+            env.storage().persistent().set(&DataKey::Balance(company_id, asset.clone()), &corrupted);
+        });
+
+        let result = client.try_release_reserve(&company_id, &asset, &100i128);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            TreasuryIsolationError::InsufficientReserve
         );
     }
 }
